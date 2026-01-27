@@ -431,7 +431,27 @@ export async function handleOpenResponsesHttpRequest(
     return handleSessionsHttpRequest(req, res, opts, url);
   }
 
-  if (url.pathname !== "/v1/responses") return false;
+  // Handle /chat/stop endpoint (baseline frontend compatibility)
+  if (url.pathname === "/chat/stop" && req.method === "POST") {
+    const token = getBearerToken(req);
+    const authResult = await authorizeGatewayConnect({
+      auth: opts.auth,
+      connectAuth: { token, password: token },
+      req,
+      trustedProxies: opts.trustedProxies,
+    });
+    if (!authResult.ok) {
+      sendUnauthorized(res);
+      return true;
+    }
+    // Best-effort stop: the actual abort is handled via the event system
+    sendJson(res, 200, { success: true, was_active: false });
+    return true;
+  }
+
+  // Accept both /v1/responses (OpenResponses) and /chat (baseline)
+  const isChatEndpoint = url.pathname === "/chat";
+  if (url.pathname !== "/v1/responses" && !isChatEndpoint) return false;
 
   if (req.method !== "POST") {
     sendMethodNotAllowed(res);
@@ -459,18 +479,52 @@ export async function handleOpenResponsesHttpRequest(
   const body = await readJsonBodyOrError(req, res, maxBodyBytes);
   if (body === undefined) return true;
 
-  // Validate request body with Zod
-  const parseResult = CreateResponseBodySchema.safeParse(body);
-  if (!parseResult.success) {
-    const issue = parseResult.error.issues[0];
-    const message = issue ? `${issue.path.join(".")}: ${issue.message}` : "Invalid request body";
-    sendJson(res, 400, {
-      error: { message, type: "invalid_request_error" },
-    });
-    return true;
+  // Translate /chat request format to OpenResponses format
+  let payload: CreateResponseBody;
+  if (isChatEndpoint) {
+    const chatBody = body as { session_id?: string; user_id?: string; message?: string };
+    if (!chatBody.message) {
+      sendJson(res, 400, {
+        error: { message: "Missing 'message' field", type: "invalid_request_error" },
+      });
+      return true;
+    }
+    // Synthesize an OpenResponses-compatible payload
+    const syntheticPayload = {
+      model: "default",
+      stream: true,
+      input: [
+        {
+          type: "message" as const,
+          role: "user" as const,
+          content: [{ type: "input_text" as const, text: chatBody.message }],
+        },
+      ],
+      user: chatBody.user_id,
+    };
+    // Set session key via header so resolveOpenResponsesSessionKey picks it up
+    if (chatBody.session_id) {
+      req.headers["x-clawdbot-session-key"] = chatBody.session_id;
+    }
+    const parseResult = CreateResponseBodySchema.safeParse(syntheticPayload);
+    if (!parseResult.success) {
+      sendJson(res, 400, { error: { message: "Invalid request", type: "invalid_request_error" } });
+      return true;
+    }
+    payload = parseResult.data;
+  } else {
+    // Validate request body with Zod
+    const parseResult = CreateResponseBodySchema.safeParse(body);
+    if (!parseResult.success) {
+      const issue = parseResult.error.issues[0];
+      const message = issue ? `${issue.path.join(".")}: ${issue.message}` : "Invalid request body";
+      sendJson(res, 400, {
+        error: { message, type: "invalid_request_error" },
+      });
+      return true;
+    }
+    payload = parseResult.data;
   }
-
-  const payload: CreateResponseBody = parseResult.data;
   const stream = Boolean(payload.stream);
   const model = payload.model;
   const user = payload.user;
@@ -748,6 +802,10 @@ export async function handleOpenResponsesHttpRequest(
     });
 
     writeSseEvent(res, { type: "response.completed", response: finalResponse });
+
+    // Emit AI SDK v6 finish event for baseline frontend compatibility
+    writeSseEvent(res, { type: "finish" } as Record<string, unknown>);
+
     writeDone(res);
     res.end();
   };
@@ -812,6 +870,12 @@ export async function handleOpenResponsesHttpRequest(
         content_index: 0,
         delta: content,
       });
+
+      // Also emit AI SDK v6 text-delta for baseline frontend compatibility
+      writeSseEvent(res, {
+        type: "text-delta",
+        delta: content,
+      } as Record<string, unknown>);
       return;
     }
 

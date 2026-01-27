@@ -73,7 +73,7 @@ type OpenResponsesHttpOptions = {
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
 
-function writeSseEvent(res: ServerResponse, event: StreamingEvent) {
+function writeSseEvent(res: ServerResponse, event: StreamingEvent | Record<string, unknown>) {
   res.write(`event: ${event.type}\n`);
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
@@ -791,6 +791,7 @@ export async function handleOpenResponsesHttpRequest(
     part: { type: "output_text", text: "" },
   });
 
+  let toolOutputIndex = 1; // Start at 1 since output_index 0 is the main text message
   unsubscribe = onAgentEvent((evt) => {
     if (evt.runId !== responseId) return;
     if (closed) return;
@@ -819,27 +820,73 @@ export async function handleOpenResponsesHttpRequest(
       const toolName = evt.data?.name as string | undefined;
       const toolCallId = (evt.data?.toolCallId as string) ?? "";
 
-      // Emit server-side tool events for UI display
+      // Emit tool events in format compatible with the basic frontend:
+      // - tool.invocation with state "running" on start
+      // - tool.invocation with state "completed" and result on completion
+      // - Standard response.output_item.added/done for function_call items
       if (phase === "start" && toolName) {
+        const args = (evt.data?.args as Record<string, unknown>) ?? {};
+        // Custom event for frontends that handle tool.invocation
         writeSseEvent(res, {
           type: "tool.invocation",
           toolCallId,
           toolName,
-          args: (evt.data?.args as Record<string, unknown>) ?? {},
+          args,
           state: "running",
+        } as Record<string, unknown>);
+        // Standard OpenAI format for frontends that handle response.output_item
+        writeSseEvent(res, {
+          type: "response.output_item.added",
+          output_index: toolOutputIndex++,
+          item: {
+            type: "function_call",
+            id: toolCallId,
+            call_id: toolCallId,
+            name: toolName,
+            arguments: JSON.stringify(args),
+            status: "in_progress",
+          },
         });
       }
 
       if (phase === "result" && toolName) {
         const isError = Boolean(evt.data?.isError);
         const result = evt.data?.result;
+        const args = (evt.data?.args as Record<string, unknown>) ?? {};
+        // Custom event for frontends that handle tool.invocation state updates
         writeSseEvent(res, {
-          type: "tool.output_available",
+          type: "tool.invocation",
           toolCallId,
           toolName,
+          args,
+          state: isError ? "failed" : "completed",
           result: result ?? null,
-          isError,
-        });
+        } as Record<string, unknown>);
+        // Standard OpenAI format
+        writeSseEvent(res, {
+          type: "response.output_item.done",
+          output_index: toolOutputIndex,
+          item: {
+            type: "function_call",
+            id: toolCallId,
+            call_id: toolCallId,
+            name: toolName,
+            arguments: JSON.stringify(args),
+            status: "completed" as const,
+          },
+        } as Record<string, unknown>);
+        // Emit function_call_output for the result
+        if (result) {
+          writeSseEvent(res, {
+            type: "response.output_item.added" as const,
+            output_index: toolOutputIndex++,
+            item: {
+              type: "function_call_output" as const,
+              call_id: toolCallId,
+              output: typeof result === "string" ? result : JSON.stringify(result),
+            },
+          } as Record<string, unknown>);
+        }
       }
 
       // Emit canvas events for A2UI tool operations

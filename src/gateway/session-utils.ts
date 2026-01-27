@@ -614,10 +614,19 @@ export function listSessionsFromStore(params: {
     let derivedTitle: string | undefined;
     let lastMessagePreview: string | undefined;
     if (entry?.sessionId) {
+      // When storePath is "(multiple)", resolve the actual store path from the session key's agentId
+      let effectiveStorePath = storePath;
+      if (storePath === "(multiple)" || !storePath || storePath === "") {
+        const keyParts = s.key.split(":");
+        const agentId = keyParts.length >= 2 && keyParts[0] === "agent" ? keyParts[1] : undefined;
+        if (agentId) {
+          effectiveStorePath = resolveStorePath(cfg.session?.store, { agentId });
+        }
+      }
       if (includeDerivedTitles) {
         const firstUserMsg = readFirstUserMessageFromTranscript(
           entry.sessionId,
-          storePath,
+          effectiveStorePath,
           entry.sessionFile,
         );
         derivedTitle = deriveSessionTitle(entry, firstUserMsg);
@@ -625,7 +634,7 @@ export function listSessionsFromStore(params: {
       if (includeLastMessage) {
         const lastMsg = readLastMessagePreviewFromTranscript(
           entry.sessionId,
-          storePath,
+          effectiveStorePath,
           entry.sessionFile,
         );
         if (lastMsg) lastMessagePreview = lastMsg;

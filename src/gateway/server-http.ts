@@ -29,6 +29,7 @@ import {
 import { applyHookMappings } from "./hooks-mapping.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
+import { handleOpenResponsesApiRequest } from "./openresponses-api.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
 import { handleFilesHttpRequest } from "./files-http.js";
 
@@ -259,6 +260,13 @@ export function createGatewayHttpServer(opts: {
           return;
       }
       if (openResponsesEnabled) {
+        if (
+          await handleOpenResponsesApiRequest(req, res, {
+            auth: resolvedAuth,
+            trustedProxies,
+          })
+        )
+          return;
         if (
           await handleOpenResponsesHttpRequest(req, res, {
             auth: resolvedAuth,

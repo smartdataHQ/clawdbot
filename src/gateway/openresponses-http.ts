@@ -814,6 +814,79 @@ export async function handleOpenResponsesHttpRequest(
       return;
     }
 
+    if (evt.stream === "tool") {
+      const phase = evt.data?.phase;
+      const toolName = evt.data?.name;
+
+      // Emit canvas events for A2UI tool operations
+      if (toolName === "canvas") {
+        const toolCallId = (evt.data?.toolCallId as string) ?? "";
+        const args = evt.data?.args as Record<string, unknown> | undefined;
+        const action = args?.action as string | undefined;
+
+        if (phase === "start" && (action === "a2ui_push" || action === "a2ui_reset")) {
+          const canvasId = "default";
+          const artifactId = toolCallId || `canvas_${randomUUID()}`;
+          const jsonl = (args?.jsonl as string) ?? "";
+
+          if (action === "a2ui_push" && jsonl) {
+            // Parse JSONL to extract component data for canvas-update events
+            const lines = jsonl.split("\n").filter((l) => l.trim());
+            for (const line of lines) {
+              try {
+                const parsed = JSON.parse(line);
+                writeSseEvent(res, {
+                  type: "canvas.update",
+                  canvasId,
+                  componentId: parsed.id ?? parsed.componentId,
+                  artifactId,
+                  jsonTree: parsed,
+                  action: "upsert",
+                });
+              } catch {
+                /* skip malformed lines */
+              }
+            }
+          } else if (action === "a2ui_reset") {
+            writeSseEvent(res, {
+              type: "canvas.update",
+              canvasId,
+              artifactId,
+              jsonTree: null,
+              action: "reset",
+            });
+          }
+        }
+
+        if (phase === "result") {
+          const isError = evt.data?.isError;
+          const canvasId = "default";
+          const artifactId = toolCallId || `canvas_${randomUUID()}`;
+
+          if (isError) {
+            const errorMsg =
+              typeof evt.data?.result === "string"
+                ? evt.data.result
+                : JSON.stringify(evt.data?.result ?? "Canvas tool error");
+            writeSseEvent(res, {
+              type: "canvas.error",
+              canvasId,
+              artifactId,
+              error: errorMsg,
+            });
+          } else {
+            writeSseEvent(res, {
+              type: "canvas.complete",
+              canvasId,
+              artifactId,
+              jsonTree: null,
+            });
+          }
+        }
+      }
+      return;
+    }
+
     if (evt.stream === "lifecycle") {
       const phase = evt.data?.phase;
       if (phase === "end" || phase === "error") {

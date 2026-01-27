@@ -341,6 +341,34 @@ export const OutputTextDoneEventSchema = z.object({
   text: z.string(),
 });
 
+// Canvas / A2UI streaming events
+const CanvasUpdateEventSchema = z.object({
+  type: z.literal("canvas.update"),
+  canvasId: z.string(),
+  componentId: z.string().optional(),
+  artifactId: z.string(),
+  jsonTree: z.unknown(),
+  action: z.string().optional(),
+  progress: z.number().optional(),
+});
+
+const CanvasCompleteEventSchema = z.object({
+  type: z.literal("canvas.complete"),
+  canvasId: z.string(),
+  componentId: z.string().optional(),
+  artifactId: z.string(),
+  jsonTree: z.unknown(),
+  action: z.string().optional(),
+});
+
+const CanvasErrorEventSchema = z.object({
+  type: z.literal("canvas.error"),
+  canvasId: z.string(),
+  componentId: z.string().optional(),
+  artifactId: z.string(),
+  error: z.string(),
+});
+
 export type StreamingEvent =
   | z.infer<typeof ResponseCreatedEventSchema>
   | z.infer<typeof ResponseInProgressEventSchema>
@@ -351,4 +379,7 @@ export type StreamingEvent =
   | z.infer<typeof ContentPartAddedEventSchema>
   | z.infer<typeof ContentPartDoneEventSchema>
   | z.infer<typeof OutputTextDeltaEventSchema>
-  | z.infer<typeof OutputTextDoneEventSchema>;
+  | z.infer<typeof OutputTextDoneEventSchema>
+  | z.infer<typeof CanvasUpdateEventSchema>
+  | z.infer<typeof CanvasCompleteEventSchema>
+  | z.infer<typeof CanvasErrorEventSchema>;

@@ -9,6 +9,14 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { loadConfig } from "../config/config.js";
+import {
+  listSessionsFromStore,
+  loadCombinedSessionStoreForGateway,
+  readSessionPreviewItemsFromTranscript,
+  resolveGatewaySessionStoreTarget,
+} from "./session-utils.js";
+import { loadSessionStore, type SessionEntry } from "../config/sessions.js";
 import { buildHistoryContextFromEntries, type HistoryEntry } from "../auto-reply/reply/history.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommand } from "../commands/agent.js";
@@ -314,12 +322,115 @@ function createAssistantOutputItem(params: {
   };
 }
 
+async function handleSessionsHttpRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  opts: OpenResponsesHttpOptions,
+  url: URL,
+): Promise<boolean> {
+  // GET /v1/sessions — list sessions filtered by openresponses: prefix
+  if (url.pathname === "/v1/sessions" && req.method === "GET") {
+    const cfg = loadConfig();
+    const { storePath, store } = loadCombinedSessionStoreForGateway(cfg);
+    const search = url.searchParams.get("search") ?? undefined;
+    const limitParam = url.searchParams.get("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : 50;
+
+    const result = listSessionsFromStore({
+      cfg,
+      storePath,
+      store,
+      opts: {
+        includeDerivedTitles: true,
+        includeLastMessage: true,
+        search,
+        limit,
+      },
+    });
+
+    // Filter to only openresponses sessions
+    const filtered = result.sessions.filter((s) => s.key.includes("openresponses"));
+
+    sendJson(res, 200, {
+      sessions: filtered.map((s) => ({
+        key: s.key,
+        sessionId: s.sessionId,
+        title: s.derivedTitle ?? s.displayName ?? s.label ?? s.key,
+        updatedAt: s.updatedAt,
+        lastMessage: s.lastMessagePreview,
+        model: s.model,
+      })),
+    });
+    return true;
+  }
+
+  // GET /v1/sessions/:key/messages — get message preview for a session
+  const messagesMatch = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/messages$/);
+  if (messagesMatch && req.method === "GET") {
+    const sessionKey = decodeURIComponent(messagesMatch[1]!);
+    const cfg = loadConfig();
+    const target = resolveGatewaySessionStoreTarget({ cfg, key: sessionKey });
+    const store = loadSessionStore(target.storePath);
+    const entry =
+      target.storeKeys.map((candidate) => store[candidate]).find(Boolean) ??
+      store[target.canonicalKey];
+
+    if (!entry?.sessionId) {
+      sendJson(res, 200, { messages: [] });
+      return true;
+    }
+
+    const limitParam = url.searchParams.get("limit");
+    const limit = limitParam ? Math.min(parseInt(limitParam, 10), 100) : 50;
+    const maxChars = 2000;
+
+    const items = readSessionPreviewItemsFromTranscript(
+      entry.sessionId,
+      target.storePath,
+      entry.sessionFile,
+      target.agentId,
+      limit,
+      maxChars,
+    );
+
+    sendJson(res, 200, {
+      sessionKey,
+      sessionId: entry.sessionId,
+      messages: items,
+    });
+    return true;
+  }
+
+  return false;
+}
+
 export async function handleOpenResponsesHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
   opts: OpenResponsesHttpOptions,
 ): Promise<boolean> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
+
+  // Handle session listing/messages endpoints
+  if (url.pathname.startsWith("/v1/sessions")) {
+    if (req.method !== "GET") {
+      sendMethodNotAllowed(res);
+      return true;
+    }
+    const token = getBearerToken(req);
+    const authResult = await authorizeGatewayConnect({
+      auth: opts.auth,
+      connectAuth: { token, password: token },
+      req,
+      trustedProxies: opts.trustedProxies,
+    });
+    if (!authResult.ok) {
+      sendUnauthorized(res);
+      return true;
+    }
+    return handleSessionsHttpRequest(req, res, opts, url);
+  }
+
   if (url.pathname !== "/v1/responses") return false;
 
   if (req.method !== "POST") {

@@ -816,7 +816,31 @@ export async function handleOpenResponsesHttpRequest(
 
     if (evt.stream === "tool") {
       const phase = evt.data?.phase;
-      const toolName = evt.data?.name;
+      const toolName = evt.data?.name as string | undefined;
+      const toolCallId = (evt.data?.toolCallId as string) ?? "";
+
+      // Emit server-side tool events for UI display
+      if (phase === "start" && toolName) {
+        writeSseEvent(res, {
+          type: "tool.invocation",
+          toolCallId,
+          toolName,
+          args: (evt.data?.args as Record<string, unknown>) ?? {},
+          state: "running",
+        });
+      }
+
+      if (phase === "result" && toolName) {
+        const isError = Boolean(evt.data?.isError);
+        const result = evt.data?.result;
+        writeSseEvent(res, {
+          type: "tool.output_available",
+          toolCallId,
+          toolName,
+          result: result ?? null,
+          isError,
+        });
+      }
 
       // Emit canvas events for A2UI tool operations
       if (toolName === "canvas") {

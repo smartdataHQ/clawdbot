@@ -30,6 +30,7 @@ import { applyHookMappings } from "./hooks-mapping.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
+import { handleFilesHttpRequest } from "./files-http.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 
@@ -248,6 +249,15 @@ export function createGatewayHttpServer(opts: {
         return;
       if (await handleSlackHttpRequest(req, res)) return;
       if (handlePluginRequest && (await handlePluginRequest(req, res))) return;
+      if (openResponsesEnabled) {
+        if (
+          await handleFilesHttpRequest(req, res, {
+            auth: resolvedAuth,
+            trustedProxies,
+          })
+        )
+          return;
+      }
       if (openResponsesEnabled) {
         if (
           await handleOpenResponsesHttpRequest(req, res, {

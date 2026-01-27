@@ -382,4 +382,20 @@ export type StreamingEvent =
   | z.infer<typeof OutputTextDoneEventSchema>
   | z.infer<typeof CanvasUpdateEventSchema>
   | z.infer<typeof CanvasCompleteEventSchema>
-  | z.infer<typeof CanvasErrorEventSchema>;
+  | z.infer<typeof CanvasErrorEventSchema>
+  | {
+      type: "tool.invocation";
+      toolCallId: string;
+      toolName: string;
+      args: Record<string, unknown>;
+      state: string;
+    }
+  | {
+      type: "tool.output_available";
+      toolCallId: string;
+      toolName: string;
+      result: unknown;
+      isError: boolean;
+    }
+  | { type: "file.added"; filename: string; path: string; size?: number }
+  | { type: "file.deleted"; path: string };

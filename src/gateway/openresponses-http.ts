@@ -820,13 +820,27 @@ export async function handleOpenResponsesHttpRequest(
       const toolName = evt.data?.name as string | undefined;
       const toolCallId = (evt.data?.toolCallId as string) ?? "";
 
-      // Emit tool events in format compatible with the basic frontend:
-      // - tool.invocation with state "running" on start
-      // - tool.invocation with state "completed" and result on completion
-      // - Standard response.output_item.added/done for function_call items
+      // Emit tool events in three formats for maximum compatibility:
+      // 1. Vercel AI SDK data stream protocol (tool-input-start/available, tool-output-available)
+      // 2. tool.invocation with state transitions (basic frontend custom handler)
+      // 3. OpenAI Responses API format (response.output_item.added/done with function_call)
       if (phase === "start" && toolName) {
         const args = (evt.data?.args as Record<string, unknown>) ?? {};
-        // Custom event for frontends that handle tool.invocation
+
+        // Vercel AI SDK data stream format
+        writeSseEvent(res, {
+          type: "tool-input-start",
+          toolCallId,
+          toolName,
+        } as Record<string, unknown>);
+        writeSseEvent(res, {
+          type: "tool-input-available",
+          toolCallId,
+          toolName,
+          input: args,
+        } as Record<string, unknown>);
+
+        // Custom tool.invocation event
         writeSseEvent(res, {
           type: "tool.invocation",
           toolCallId,
@@ -834,7 +848,8 @@ export async function handleOpenResponsesHttpRequest(
           args,
           state: "running",
         } as Record<string, unknown>);
-        // Standard OpenAI format for frontends that handle response.output_item
+
+        // OpenAI Responses API format
         writeSseEvent(res, {
           type: "response.output_item.added",
           output_index: toolOutputIndex++,
@@ -853,7 +868,16 @@ export async function handleOpenResponsesHttpRequest(
         const isError = Boolean(evt.data?.isError);
         const result = evt.data?.result;
         const args = (evt.data?.args as Record<string, unknown>) ?? {};
-        // Custom event for frontends that handle tool.invocation state updates
+
+        // Vercel AI SDK data stream format
+        writeSseEvent(res, {
+          type: "tool-output-available",
+          toolCallId,
+          toolName,
+          output: result ?? null,
+        } as Record<string, unknown>);
+
+        // Custom tool.invocation state update
         writeSseEvent(res, {
           type: "tool.invocation",
           toolCallId,
@@ -862,7 +886,8 @@ export async function handleOpenResponsesHttpRequest(
           state: isError ? "failed" : "completed",
           result: result ?? null,
         } as Record<string, unknown>);
-        // Standard OpenAI format
+
+        // OpenAI Responses API format
         writeSseEvent(res, {
           type: "response.output_item.done",
           output_index: toolOutputIndex,
@@ -875,7 +900,6 @@ export async function handleOpenResponsesHttpRequest(
             status: "completed" as const,
           },
         } as Record<string, unknown>);
-        // Emit function_call_output for the result
         if (result) {
           writeSseEvent(res, {
             type: "response.output_item.added" as const,

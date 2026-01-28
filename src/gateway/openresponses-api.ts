@@ -18,6 +18,9 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as nodePath from "node:path";
+import * as os from "node:os";
 
 import { loadConfig } from "../config/config.js";
 import {
@@ -221,6 +224,17 @@ export async function handleOpenResponsesApiRequest(
     return handleCreateConversation(req, res);
   }
 
+  // GET/PUT/DELETE /api/conversations/:id/plan
+  const planMatch = path.match(/^\/api\/conversations\/([^/]+)\/plan$/);
+  if (planMatch) {
+    const conversationId = decodeURIComponent(planMatch[1]!);
+    if (req.method === "GET") return handleGetPlan(res, conversationId);
+    if (req.method === "PUT") return handleSavePlan(req, res, conversationId);
+    if (req.method === "DELETE") return handleDeletePlan(res, conversationId);
+    sendMethodNotAllowed(res);
+    return true;
+  }
+
   // GET/PUT/DELETE /api/conversations/:id
   const convMatch = path.match(/^\/api\/conversations\/(.+)$/);
   if (convMatch) {
@@ -377,6 +391,86 @@ async function handleUpdateConversation(
     created_at: now,
     updated_at: now,
   });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Plans storage
+// ---------------------------------------------------------------------------
+
+function getPlansDir(): string {
+  const dir = nodePath.join(os.homedir(), ".clawdbot-dev", "plans");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function planFilePath(conversationId: string): string {
+  // Sanitize the key for filesystem use
+  const safe = conversationId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return nodePath.join(getPlansDir(), `${safe}.json`);
+}
+
+function handleGetPlan(res: ServerResponse, conversationId: string): boolean {
+  const filePath = planFilePath(conversationId);
+  try {
+    if (!fs.existsSync(filePath)) {
+      sendJson(res, 200, null);
+      return true;
+    }
+    const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    sendJson(res, 200, data);
+  } catch {
+    sendJson(res, 200, null);
+  }
+  return true;
+}
+
+async function handleSavePlan(
+  req: IncomingMessage,
+  res: ServerResponse,
+  conversationId: string,
+): Promise<boolean> {
+  const body = await readJsonBodyOrError(req, res, 64 * 1024);
+  if (body === undefined) return true;
+
+  const payload = body as Record<string, unknown>;
+  const now = new Date().toISOString();
+  const planData = {
+    id: 1,
+    conversation_id: conversationId,
+    strategy: payload.strategy ?? "orchestrated",
+    content: payload.content ?? {},
+    created_at: now,
+    updated_at: now,
+  };
+
+  const filePath = planFilePath(conversationId);
+  // Merge with existing if present
+  try {
+    if (fs.existsSync(filePath)) {
+      const existing = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      planData.created_at = existing.created_at || now;
+      planData.id = existing.id || 1;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  fs.writeFileSync(filePath, JSON.stringify(planData, null, 2));
+  sendJson(res, 200, planData);
+  return true;
+}
+
+async function handleDeletePlan(res: ServerResponse, conversationId: string): Promise<boolean> {
+  const filePath = planFilePath(conversationId);
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {
+    /* ignore */
+  }
+  sendJson(res, 200, { ok: true });
   return true;
 }
 

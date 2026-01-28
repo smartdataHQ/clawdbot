@@ -977,6 +977,34 @@ export async function handleOpenResponsesHttpRequest(
         }
       }
 
+      // Emit file events for file-related tool operations
+      if (phase === "result" && !Boolean(evt.data?.isError)) {
+        const args = (evt.data?.args as Record<string, unknown>) ?? {};
+        const fileToolNames = ["Write", "write", "Edit", "edit", "create_file", "save_file"];
+        const deleteToolNames = ["delete_file", "rm", "remove_file"];
+        if (fileToolNames.includes(toolName ?? "")) {
+          const filePath = (args.path as string) || (args.file_path as string) || "";
+          if (filePath) {
+            writeSseEvent(res, {
+              type: "data-fileAdded",
+              data: {
+                filename: filePath.split("/").pop(),
+                path: filePath,
+                mimeType: undefined,
+              },
+            } as Record<string, unknown>);
+          }
+        } else if (deleteToolNames.includes(toolName ?? "")) {
+          const filePath = (args.path as string) || (args.file_path as string) || "";
+          if (filePath) {
+            writeSseEvent(res, {
+              type: "data-fileDeleted",
+              data: { path: filePath },
+            } as Record<string, unknown>);
+          }
+        }
+      }
+
       // Emit canvas events for A2UI tool operations
       if (toolName === "canvas") {
         const toolCallId = (evt.data?.toolCallId as string) ?? "";

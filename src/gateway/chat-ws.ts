@@ -41,12 +41,29 @@ export interface ChatWsOptions {
   trustedProxies?: string[];
 }
 
+interface BrowserToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  requiresPermission?: string[];
+  fireAndForget?: boolean;
+}
+
 interface ChatWsClient {
   ws: WebSocket;
   chatId: string;
   userId: string;
   sessionKey: string;
   runId: string | null;
+  browserTools: BrowserToolDefinition[];
+  pendingRpcCallbacks: Map<
+    string,
+    {
+      resolve: (result: unknown) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >;
 }
 
 /**
@@ -103,6 +120,8 @@ export function createChatWsServer(opts: ChatWsOptions): {
         userId,
         sessionKey,
         runId: null,
+        browserTools: [],
+        pendingRpcCallbacks: new Map(),
       };
 
       handleConnection(client);
@@ -124,7 +143,13 @@ export function createChatWsServer(opts: ChatWsOptions): {
     });
 
     ws.on("close", () => {
-      // Clean up
+      // Clean up pending RPC callbacks
+      for (const [, cb] of client.pendingRpcCallbacks) {
+        clearTimeout(cb.timer);
+        cb.reject(new Error("WebSocket closed"));
+      }
+      client.pendingRpcCallbacks.clear();
+      client.browserTools = [];
     });
 
     ws.on("error", () => {
@@ -154,19 +179,64 @@ export function createChatWsServer(opts: ChatWsOptions): {
 
     // Tools changed notification
     if (type === "tools-changed") {
-      // TODO: store browser tools for RPC
+      const tools = msg.tools as BrowserToolDefinition[] | undefined;
+      client.browserTools = Array.isArray(tools) ? tools : [];
       return;
     }
 
     // RPC response from client
     if (type === "rpc-response") {
-      // TODO: resolve pending RPC request
+      const id = msg.id as string;
+      const pending = client.pendingRpcCallbacks.get(id);
+      if (pending) {
+        client.pendingRpcCallbacks.delete(id);
+        clearTimeout(pending.timer);
+        if (msg.error) {
+          const err = msg.error as { message?: string };
+          pending.reject(new Error(err.message || "RPC error"));
+        } else {
+          pending.resolve(msg.result);
+        }
+      }
       return;
     }
 
-    // RPC request from client
+    // RPC request from client (e.g. canvas_action)
     if (type === "rpc-request") {
-      // TODO: handle client RPC requests
+      const method = msg.method as string;
+      const id = msg.id as string;
+      const params = (msg.params as Record<string, unknown>) || {};
+
+      const sendResponse = (result: unknown, error?: { code: number; message: string }) => {
+        if (client.ws.readyState === client.ws.OPEN) {
+          const resp: Record<string, unknown> = {
+            type: "rpc-response",
+            jsonrpc: "2.0",
+            id,
+          };
+          if (error) {
+            resp.error = error;
+          } else {
+            resp.result = result;
+          }
+          client.ws.send(JSON.stringify(resp));
+        }
+      };
+
+      if (method === "canvas_action") {
+        // Forward canvas action to agent as a message
+        const canvasId = (params.canvasId as string) || "default";
+        const action = params.action as Record<string, unknown> | undefined;
+        if (action) {
+          const actionMsg = `[Canvas action on ${canvasId}: ${JSON.stringify(action)}]`;
+          handleChatMessage(client, actionMsg);
+          sendResponse({ ok: true });
+        } else {
+          sendResponse(null, { code: -32602, message: "Missing action params" });
+        }
+      } else {
+        sendResponse(null, { code: -32601, message: `Method not found: ${method}` });
+      }
       return;
     }
 
@@ -239,6 +309,26 @@ export function createChatWsServer(opts: ChatWsOptions): {
             state: isError ? "failed" : "completed",
             result: result ?? null,
           });
+
+          // File events
+          if (!isError) {
+            const fileToolNames = ["Write", "write", "Edit", "edit", "create_file", "save_file"];
+            const deleteToolNames = ["delete_file", "rm", "remove_file"];
+            if (fileToolNames.includes(toolName)) {
+              const filePath = (args.path as string) || (args.file_path as string) || "";
+              if (filePath) {
+                send({
+                  type: "data-fileAdded",
+                  data: { filename: filePath.split("/").pop(), path: filePath },
+                });
+              }
+            } else if (deleteToolNames.includes(toolName)) {
+              const filePath = (args.path as string) || (args.file_path as string) || "";
+              if (filePath) {
+                send({ type: "data-fileDeleted", data: { path: filePath } });
+              }
+            }
+          }
         }
 
         // Canvas events

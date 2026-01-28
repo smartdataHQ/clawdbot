@@ -7,6 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline } from "node:stream/promises";
@@ -17,6 +18,36 @@ import { resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
 import { authorizeGatewayConnect, type ResolvedGatewayAuth } from "./auth.js";
 import { getBearerToken, resolveAgentIdForRequest } from "./http-utils.js";
 import { sendJson, sendMethodNotAllowed, sendText, sendUnauthorized } from "./http-common.js";
+
+// ---------------------------------------------------------------------------
+// Chunked upload state
+// ---------------------------------------------------------------------------
+
+const CHUNK_SIZE = 1024 * 1024; // 1MB default
+
+interface PendingUpload {
+  uploadId: string;
+  sessionId: string;
+  files: Array<{
+    filename: string;
+    size: number;
+    mimeType: string;
+    relativePath: string;
+  }>;
+  receivedChunks: Set<number>;
+  totalChunks: number;
+  chunkSize: number;
+  tempDir: string;
+  createdAt: number;
+}
+
+const pendingUploads = new Map<string, PendingUpload>();
+
+function getUploadsTempBase(): string {
+  const devDir = path.join(os.homedir(), ".clawdbot-dev", "files", "uploads");
+  fs.mkdirSync(devDir, { recursive: true });
+  return devDir;
+}
 
 export interface FilesHttpOptions {
   auth: ResolvedGatewayAuth;
@@ -175,6 +206,186 @@ export async function handleFilesHttpRequest(
     return true;
   }
 
+  // POST /files/upload/init — chunked upload initialization
+  if (endpoint === "upload/init" && req.method === "POST") {
+    try {
+      const raw = await readRawBody(req, 1024 * 64);
+      const body = JSON.parse(raw.toString("utf-8"));
+      const sessionId = (body.session_id as string) || "";
+      const filesArr =
+        (body.files as Array<{
+          filename: string;
+          size?: number;
+          relative_path?: string;
+          mime_type?: string;
+        }>) || [];
+
+      if (filesArr.length === 0) {
+        sendJson(res, 400, { error: "No files specified" });
+        return true;
+      }
+
+      const uploads: Array<{
+        upload_id: string;
+        chunk_size: number;
+        total_chunks: number;
+      }> = [];
+
+      for (const f of filesArr) {
+        const uploadId = randomUUID();
+        const fileSize = f.size || 0;
+        const totalChunks = fileSize > 0 ? Math.ceil(fileSize / CHUNK_SIZE) : 1;
+        const tempDir = path.join(getUploadsTempBase(), uploadId);
+        fs.mkdirSync(tempDir, { recursive: true });
+
+        pendingUploads.set(uploadId, {
+          uploadId,
+          sessionId,
+          files: [
+            {
+              filename: f.filename,
+              size: fileSize,
+              mimeType: f.mime_type || "application/octet-stream",
+              relativePath: f.relative_path || "",
+            },
+          ],
+          receivedChunks: new Set(),
+          totalChunks,
+          chunkSize: CHUNK_SIZE,
+          tempDir,
+          createdAt: Date.now(),
+        });
+
+        uploads.push({
+          upload_id: uploadId,
+          chunk_size: CHUNK_SIZE,
+          total_chunks: totalChunks,
+        });
+      }
+
+      sendJson(res, 200, { uploads });
+    } catch (err) {
+      sendJson(res, 500, { error: String(err) });
+    }
+    return true;
+  }
+
+  // POST /files/upload/:id/chunk — receive a chunk
+  const chunkMatch = endpoint.match(/^upload\/([^/]+)\/chunk$/);
+  if (chunkMatch && req.method === "POST") {
+    const uploadId = chunkMatch[1]!;
+    const pending = pendingUploads.get(uploadId);
+    if (!pending) {
+      sendJson(res, 404, { error: "Upload not found" });
+      return true;
+    }
+
+    try {
+      const raw = await readRawBody(req, CHUNK_SIZE + 1024 * 64);
+      const contentType = req.headers["content-type"] || "";
+
+      let chunkIndex = 0;
+      let chunkData: Buffer;
+
+      if (contentType.includes("multipart/form-data")) {
+        // Parse multipart: extract chunk_index and file data
+        // Simple boundary-based parser
+        const boundary = contentType.split("boundary=")[1]?.split(";")[0]?.trim();
+        if (!boundary) {
+          sendJson(res, 400, { error: "Missing boundary" });
+          return true;
+        }
+        const parts = parseMultipart(raw, boundary);
+        const indexPart = parts.find((p) => p.name === "chunk_index");
+        const filePart = parts.find((p) => p.name === "file");
+        chunkIndex = indexPart ? parseInt(indexPart.data.toString("utf-8"), 10) : 0;
+        chunkData = filePart?.data ?? raw;
+      } else {
+        // Raw binary, chunk index from query
+        chunkIndex = parseInt(
+          url.searchParams.get("offset") || url.searchParams.get("chunk_index") || "0",
+          10,
+        );
+        chunkData = raw;
+      }
+
+      const chunkPath = path.join(pending.tempDir, `chunk_${chunkIndex}`);
+      await fs.promises.writeFile(chunkPath, chunkData);
+      pending.receivedChunks.add(chunkIndex);
+
+      sendJson(res, 200, { received: pending.receivedChunks.size });
+    } catch (err) {
+      sendJson(res, 500, { error: String(err) });
+    }
+    return true;
+  }
+
+  // POST /files/upload/:id/complete — finalize chunked upload
+  const completeMatch = endpoint.match(/^upload\/([^/]+)\/complete$/);
+  if (completeMatch && req.method === "POST") {
+    const uploadId = completeMatch[1]!;
+    const pending = pendingUploads.get(uploadId);
+    if (!pending) {
+      sendJson(res, 404, { error: "Upload not found" });
+      return true;
+    }
+
+    try {
+      const fileInfo = pending.files[0];
+      if (!fileInfo) {
+        sendJson(res, 400, { error: "No file info" });
+        return true;
+      }
+
+      // Reassemble chunks
+      const chunks: Buffer[] = [];
+      for (let i = 0; i < pending.totalChunks; i++) {
+        const chunkPath = path.join(pending.tempDir, `chunk_${i}`);
+        if (!fs.existsSync(chunkPath)) {
+          sendJson(res, 400, { error: `Missing chunk ${i}` });
+          return true;
+        }
+        chunks.push(await fs.promises.readFile(chunkPath));
+      }
+      const assembled = Buffer.concat(chunks);
+
+      // Write to workspace
+      const relDir = fileInfo.relativePath
+        ? fileInfo.relativePath.replace(/^\/workspace\/?/, "")
+        : ".";
+      const resolved = safePath(workspace, path.join(relDir, fileInfo.filename));
+      if (!resolved) {
+        sendJson(res, 400, { error: "Invalid path" });
+        return true;
+      }
+
+      await fs.promises.mkdir(path.dirname(resolved), { recursive: true });
+      await fs.promises.writeFile(resolved, assembled);
+
+      // Cleanup temp
+      await fs.promises.rm(pending.tempDir, { recursive: true, force: true });
+      pendingUploads.delete(uploadId);
+
+      const stat = await fs.promises.stat(resolved);
+      const relativePath = path.relative(workspace, resolved);
+
+      sendJson(res, 200, {
+        success: true,
+        file: {
+          name: fileInfo.filename,
+          path: relativePath,
+          size: stat.size,
+          is_dir: false,
+          modified_at: stat.mtime.toISOString(),
+          mime_type: mimeFromExt(fileInfo.filename) || fileInfo.mimeType,
+        },
+      });
+    } catch (err) {
+      sendJson(res, 500, { error: String(err) });
+    }
+    return true;
+  }
+
   // POST /v1/files/upload
   if (endpoint === "upload" && req.method === "POST") {
     const contentType = req.headers["content-type"] || "";
@@ -326,4 +537,61 @@ export async function handleFilesHttpRequest(
   }
 
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Simple multipart/form-data parser
+// ---------------------------------------------------------------------------
+
+interface MultipartPart {
+  name: string;
+  filename?: string;
+  data: Buffer;
+}
+
+function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
+  const parts: MultipartPart[] = [];
+  const boundaryBuf = Buffer.from(`--${boundary}`);
+  const endBuf = Buffer.from(`--${boundary}--`);
+
+  let pos = 0;
+  // Find first boundary
+  let idx = body.indexOf(boundaryBuf, pos);
+  if (idx < 0) return parts;
+  pos = idx + boundaryBuf.length;
+
+  while (pos < body.length) {
+    // Skip CRLF after boundary
+    if (body[pos] === 0x0d && body[pos + 1] === 0x0a) pos += 2;
+
+    // Check for end boundary
+    if (body.subarray(pos - boundaryBuf.length - 2, pos).indexOf(endBuf) >= 0) break;
+
+    // Read headers until double CRLF
+    const headerEnd = body.indexOf(Buffer.from("\r\n\r\n"), pos);
+    if (headerEnd < 0) break;
+
+    const headerStr = body.subarray(pos, headerEnd).toString("utf-8");
+    pos = headerEnd + 4;
+
+    // Find next boundary
+    const nextBoundary = body.indexOf(boundaryBuf, pos);
+    const dataEnd = nextBoundary >= 0 ? nextBoundary - 2 : body.length; // -2 for CRLF before boundary
+    const data = body.subarray(pos, dataEnd);
+    pos = nextBoundary >= 0 ? nextBoundary + boundaryBuf.length : body.length;
+
+    // Parse name from Content-Disposition
+    const nameMatch = headerStr.match(/name="([^"]+)"/);
+    const filenameMatch = headerStr.match(/filename="([^"]+)"/);
+
+    if (nameMatch) {
+      parts.push({
+        name: nameMatch[1]!,
+        filename: filenameMatch?.[1],
+        data,
+      });
+    }
+  }
+
+  return parts;
 }

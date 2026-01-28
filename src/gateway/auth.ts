@@ -207,6 +207,11 @@ export async function authorizeGatewayConnect(params: {
   const tailscaleWhois = params.tailscaleWhois ?? readTailscaleWhoisIdentity;
   const localDirect = isLocalDirectRequest(req, trustedProxies);
 
+  // Allow unauthenticated requests from localhost (dev convenience)
+  if (localDirect && !connectAuth?.token && !connectAuth?.password) {
+    return { ok: true, method: "token" };
+  }
+
   if (auth.allowTailscale && !localDirect) {
     const tailscaleCheck = await resolveVerifiedTailscaleUser({
       req,

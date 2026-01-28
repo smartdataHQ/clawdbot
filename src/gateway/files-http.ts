@@ -128,7 +128,8 @@ export async function handleFilesHttpRequest(
   opts: FilesHttpOptions,
 ): Promise<boolean> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
-  if (!url.pathname.startsWith("/v1/files/")) return false;
+  // Accept both /v1/files/* and /files/* (baseline frontend uses /files/*)
+  if (!url.pathname.startsWith("/v1/files/") && !url.pathname.startsWith("/files/")) return false;
 
   // Auth
   const token = getBearerToken(req);
@@ -146,7 +147,10 @@ export async function handleFilesHttpRequest(
   const agentId = resolveAgentIdForRequest({ req, model: "default" });
   const workspace = resolveWorkspace(agentId);
 
-  const endpoint = url.pathname.replace("/v1/files/", "");
+  // Strip prefix: /v1/files/ or /files/
+  const endpoint = url.pathname.startsWith("/v1/files/")
+    ? url.pathname.replace("/v1/files/", "")
+    : url.pathname.replace("/files/", "");
 
   // GET /v1/files/list
   if (endpoint === "list" && (req.method === "GET" || req.method === "POST")) {

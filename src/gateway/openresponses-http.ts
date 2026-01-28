@@ -906,7 +906,7 @@ export async function handleOpenResponsesHttpRequest(
 
         // Custom tool.invocation event
         writeSseEvent(res, {
-          type: "tool.invocation",
+          type: "tool-invocation",
           toolCallId,
           toolName,
           args,
@@ -943,7 +943,7 @@ export async function handleOpenResponsesHttpRequest(
 
         // Custom tool.invocation state update
         writeSseEvent(res, {
-          type: "tool.invocation",
+          type: "tool-invocation",
           toolCallId,
           toolName,
           args,
@@ -995,12 +995,14 @@ export async function handleOpenResponsesHttpRequest(
               try {
                 const parsed = JSON.parse(line);
                 writeSseEvent(res, {
-                  type: "canvas.update",
-                  canvasId,
-                  componentId: parsed.id ?? parsed.componentId,
-                  artifactId,
-                  jsonTree: parsed,
-                  action: "upsert",
+                  type: "data-canvas-update",
+                  data: {
+                    canvasId,
+                    componentId: parsed.id ?? parsed.componentId,
+                    artifactId,
+                    jsonTree: parsed,
+                    action: "upsert",
+                  },
                 });
               } catch {
                 /* skip malformed lines */
@@ -1008,11 +1010,13 @@ export async function handleOpenResponsesHttpRequest(
             }
           } else if (action === "a2ui_reset") {
             writeSseEvent(res, {
-              type: "canvas.update",
-              canvasId,
-              artifactId,
-              jsonTree: null,
-              action: "reset",
+              type: "data-canvas-update",
+              data: {
+                canvasId,
+                artifactId,
+                jsonTree: null,
+                action: "reset",
+              },
             });
           }
         }
@@ -1028,17 +1032,21 @@ export async function handleOpenResponsesHttpRequest(
                 ? evt.data.result
                 : JSON.stringify(evt.data?.result ?? "Canvas tool error");
             writeSseEvent(res, {
-              type: "canvas.error",
-              canvasId,
-              artifactId,
-              error: errorMsg,
+              type: "data-canvas-error",
+              data: {
+                canvasId,
+                artifactId,
+                error: errorMsg,
+              },
             });
           } else {
             writeSseEvent(res, {
-              type: "canvas.complete",
-              canvasId,
-              artifactId,
-              jsonTree: null,
+              type: "data-canvas-complete",
+              data: {
+                canvasId,
+                artifactId,
+                jsonTree: null,
+              },
             });
           }
         }

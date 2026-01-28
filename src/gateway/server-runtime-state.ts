@@ -17,6 +17,7 @@ import { createGatewayBroadcaster } from "./server-broadcast.js";
 import { type ChatRunEntry, createChatRunState } from "./server-chat.js";
 import { MAX_PAYLOAD_BYTES } from "./server-constants.js";
 import { attachGatewayUpgradeHandler, createGatewayHttpServer } from "./server-http.js";
+import { createChatWsServer } from "./chat-ws.js";
 import type { DedupeEntry } from "./server-shared.js";
 import type { PluginRegistry } from "../plugins/registry.js";
 import type { GatewayTlsRuntime } from "./server/tls.js";
@@ -144,8 +145,16 @@ export async function createGatewayRuntimeState(params: {
     noServer: true,
     maxPayload: MAX_PAYLOAD_BYTES,
   });
+  // Create chat WebSocket handler for /ws/:chatId (baseline frontend)
+  const chatWs = params.openResponsesEnabled
+    ? createChatWsServer({
+        auth: params.resolvedAuth,
+        trustedProxies: params.cfg.gateway?.trustedProxies,
+      })
+    : undefined;
+
   for (const server of httpServers) {
-    attachGatewayUpgradeHandler({ httpServer: server, wss, canvasHost });
+    attachGatewayUpgradeHandler({ httpServer: server, wss, canvasHost, chatWs });
   }
 
   const clients = new Set<GatewayWsClient>();

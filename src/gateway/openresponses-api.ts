@@ -156,6 +156,27 @@ export async function handleOpenResponsesApiRequest(
   // Route dispatch
   const path = url.pathname;
 
+  // POST /api/login — auto-succeed
+  if (path === "/api/login" && req.method === "POST") {
+    // Consume body
+    await readJsonBodyOrError(req, res, 4096);
+    sendJson(res, 200, {
+      id: 1,
+      username: "user",
+      name: "User",
+      organisation_id: 1,
+      organisation: {
+        id: 1,
+        name: "Default",
+        slug: "default",
+        created_at: new Date().toISOString(),
+      },
+      teams: [],
+      created_at: new Date().toISOString(),
+    });
+    return true;
+  }
+
   // GET /api/users/:id
   const userMatch = path.match(/^\/api\/users\/(\d+)$/);
   if (userMatch && req.method === "GET") {
